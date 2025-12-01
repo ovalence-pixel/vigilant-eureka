@@ -1,134 +1,51 @@
-import os
-
-# Directory to scan
-DIRECTORY = "./"  # Change this to your target directory
-
-def get_all_files(directory):
-    all_files = []
-    for root, dirs, files in os.walk(directory):
-        for file in files:
-            full_path = os.path.join(root, file)
-            all_files.append(full_path)
-    return all_files
-
-def main():
-    files = get_all_files(DIRECTORY)
-    print("Found files:")
-    for f in files:
-        print(f)
-    print(f"\nTotal files: {len(files)}")
-
-if __name__ == "__main__":
-    main()
-
-
-
-import re
 import json
+import csv
 
-INPUT_FILE = "example.sv"
-OUTPUT_FILE = "class_ast.json"
+INPUT_JSON = "class_ast.json"  # Your JSON file
+OUTPUT_CSV = "class_ast.csv"   # Output Excel-compatible CSV file
 
-def parse_arguments(arg_str):
+def flatten_json(obj, parent_key='', sep='.'):
     """
-    Parse a SystemVerilog argument string into a list of dictionaries.
-    Example input: "int x, logic [3:0] y, string s"
+    Flatten hierarchical JSON for Excel-friendly CSV output.
+    Nested children are flattened with keys like 'children.0.name'.
     """
-    args = []
-    arg_str = arg_str.strip()
-    if not arg_str:
-        return args
-    for arg in arg_str.split(","):
-        arg = arg.strip()
-        # Match optional 'rand', data type, optional width, argument name
-        match = re.match(r'(rand\s+)?(\w+)(\s*\[.*?\])?\s+(\w+)', arg)
-        if match:
-            is_rand = bool(match.group(1))
-            data_type = match.group(2)
-            width = match.group(3).strip() if match.group(3) else None
-            name = match.group(4)
-            args.append({
-                "type": "argument",
-                "name": name,
-                "data_type": data_type,
-                "width": width,
-                "rand": is_rand
-            })
-    return args
-
-def parse_sv_class(filename):
-    with open(filename, "r") as f:
-        content = f.read()
-
-    # Match classes with optional 'extends'
-    class_pattern = re.compile(
-        r'class\s+(\w+)(?:\s+extends\s+(\w+))?\s*;([\s\S]*?)endclass', re.MULTILINE
-    )
-    classes = []
-
-    for class_match in class_pattern.finditer(content):
-        class_name = class_match.group(1)
-        extends_name = class_match.group(2) if class_match.group(2) else None
-        class_body = class_match.group(3)
-
-        children = []
-
-        # Match signals / variables with optional 'rand' and optional width
-        signal_pattern = re.compile(
-            r'\b(rand\s+)?(int|logic|reg|string|bit|byte|shortint|longint)\b\s*(\[[^\]]+\]\s*)?(\w+)\s*;',
-            re.MULTILINE
-        )
-        for sig_match in signal_pattern.finditer(class_body):
-            is_rand = bool(sig_match.group(1))
-            data_type = sig_match.group(2)
-            width = sig_match.group(3).strip() if sig_match.group(3) else None
-            signal_name = sig_match.group(4)
-            children.append({
-                "type": "signal",
-                "name": signal_name,
-                "data_type": data_type,
-                "width": width,
-                "rand": is_rand
-            })
-
-        # Match functions
-        func_pattern = re.compile(r'function\s+[\w\s]*\s+(\w+)\s*\((.*?)\)\s*;', re.MULTILINE | re.DOTALL)
-        for f_match in func_pattern.finditer(class_body):
-            func_name = f_match.group(1)
-            arg_str = f_match.group(2)
-            func_children = parse_arguments(arg_str)
-            children.append({
-                "type": "function",
-                "name": func_name,
-                "children": func_children
-            })
-
-        # Match tasks
-        task_pattern = re.compile(r'task\s+(\w+)\s*\((.*?)\)\s*;', re.MULTILINE | re.DOTALL)
-        for t_match in task_pattern.finditer(class_body):
-            task_name = t_match.group(1)
-            arg_str = t_match.group(2)
-            task_children = parse_arguments(arg_str)
-            children.append({
-                "type": "task",
-                "name": task_name,
-                "children": task_children
-            })
-
-        classes.append({
-            "type": "class",
-            "name": class_name,
-            "extends": extends_name,
-            "children": children
-        })
-
-    return classes
+    items = []
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            new_key = f"{parent_key}{sep}{k}" if parent_key else k
+            items.extend(flatten_json(v, new_key, sep=sep))
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj):
+            new_key = f"{parent_key}{sep}{i}" if parent_key else str(i)
+            items.extend(flatten_json(v, new_key, sep=sep))
+    else:
+        items.append((parent_key, obj))
+    return items
 
 def main():
-    ast = parse_sv_class(INPUT_FILE)
-    with open(OUTPUT_FILE, "w") as f:
-        json.dump(ast, f, indent=4)
-    print(f"AST dumped to {OUTPUT_FILE}")
+    with open(INPUT_JSON, "r") as f:
+        data = json.load(f)
+
+    # Flatten each top-level object
+    rows = []
+    for obj in data:
+        flat = dict(flatten_json(obj))
+        rows.append(flat)
+
+    # Collect all column headers
+    all_keys = set()
+    for row in rows:
+        all_keys.update(row.keys())
+    all_keys = sorted(all_keys)
+
+    # Write to CSV
+    with open(OUTPUT_CSV, "w", newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=all_keys)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+
+    print(f"JSON data written to {OUTPUT_CSV} successfully.")
 
 if __name__ == "__main__":
     main()
