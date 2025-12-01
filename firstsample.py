@@ -1,299 +1,109 @@
 import re
 import json
-import sys
 
-# ============================================================
-# TOKENIZER
-# ============================================================
+INPUT_FILE = "example.sv"
+OUTPUT_FILE = "class_ast.json"
 
-TOKEN_REGEX = re.compile(
-    r"""
-    (?P<KEYWORD>\bclass\b|\bendclass\b|\bmodule\b|\bendmodule\b|
-                \bfunction\b|\bendfunction\b|
-                \balways\b|\balways_ff\b|\balways_comb\b|\balways_latch\b|
-                \binput\b|\boutput\b|\binout\b|
-                \blogic\b|\bwire\b|\bint\b|
-                \bif\b|\belse\b|\bcase\b|\bendcase\b|\bbegin\b|\bend\b) |
-    (?P<IDENT>[a-zA-Z_][a-zA-Z0-9_$]*) |
-    (?P<NUMBER>\d+'[hdbo][0-9a-fA-F_]+|\d+) |
-    (?P<STRING>"[^"]*") |
-    (?P<SYMBOL>[\(\)\[\]\{\};,=:+\-*/<>@&|!]) |
-    (?P<SKIP>\s+|//[^\n]*|/\*.*?\*/) |
-    (?P<OTHER>.)
-    """,
-    re.MULTILINE | re.DOTALL | re.VERBOSE
-)
+def parse_arguments(arg_str):
+    """
+    Parse a SystemVerilog argument string into a list of dictionaries.
+    Example input: "int x, logic [3:0] y, string s"
+    """
+    args = []
+    arg_str = arg_str.strip()
+    if not arg_str:
+        return args
+    for arg in arg_str.split(","):
+        arg = arg.strip()
+        # Match optional 'rand', data type, optional width, argument name
+        match = re.match(r'(rand\s+)?(\w+)(\s*\[.*?\])?\s+(\w+)', arg)
+        if match:
+            is_rand = bool(match.group(1))
+            data_type = match.group(2)
+            width = match.group(3).strip() if match.group(3) else None
+            name = match.group(4)
+            args.append({
+                "type": "argument",
+                "name": name,
+                "data_type": data_type,
+                "width": width,
+                "rand": is_rand
+            })
+    return args
 
+def parse_sv_class(filename):
+    with open(filename, "r") as f:
+        content = f.read()
 
-def tokenize(code):
-    tokens = []
-    for m in TOKEN_REGEX.finditer(code):
-        k = m.lastgroup
-        v = m.group()
-        if k == "SKIP" or k == "OTHER":
-            continue
-        tokens.append((k, v))
-    tokens.append(("EOF", "EOF"))
-    return tokens
+    # Match classes with optional 'extends'
+    class_pattern = re.compile(
+        r'class\s+(\w+)(?:\s+extends\s+(\w+))?\s*;([\s\S]*?)endclass', re.MULTILINE
+    )
+    classes = []
 
+    for class_match in class_pattern.finditer(content):
+        class_name = class_match.group(1)
+        extends_name = class_match.group(2) if class_match.group(2) else None
+        class_body = class_match.group(3)
 
-# ============================================================
-# PARSER
-# ============================================================
+        children = []
 
-class Parser:
-    def __init__(self, code):
-        self.tokens = tokenize(code)
-        self.pos = 0
+        # Match signals / variables with optional 'rand' and optional width
+        signal_pattern = re.compile(
+            r'\b(rand\s+)?(int|logic|reg|string|bit|byte|shortint|longint)\b\s*(\[[^\]]+\]\s*)?(\w+)\s*;',
+            re.MULTILINE
+        )
+        for sig_match in signal_pattern.finditer(class_body):
+            is_rand = bool(sig_match.group(1))
+            data_type = sig_match.group(2)
+            width = sig_match.group(3).strip() if sig_match.group(3) else None
+            signal_name = sig_match.group(4)
+            children.append({
+                "type": "signal",
+                "name": signal_name,
+                "data_type": data_type,
+                "width": width,
+                "rand": is_rand
+            })
 
-    def peek(self):
-        if self.pos >= len(self.tokens):
-            return ("EOF", "EOF")
-        return self.tokens[self.pos]
+        # Match functions
+        func_pattern = re.compile(r'function\s+[\w\s]*\s+(\w+)\s*\((.*?)\)\s*;', re.MULTILINE | re.DOTALL)
+        for f_match in func_pattern.finditer(class_body):
+            func_name = f_match.group(1)
+            arg_str = f_match.group(2)
+            func_children = parse_arguments(arg_str)
+            children.append({
+                "type": "function",
+                "name": func_name,
+                "children": func_children
+            })
 
-    def eat(self):
-        t = self.peek()
-        if self.pos < len(self.tokens):
-            self.pos += 1
-        return t
+        # Match tasks
+        task_pattern = re.compile(r'task\s+(\w+)\s*\((.*?)\)\s*;', re.MULTILINE | re.DOTALL)
+        for t_match in task_pattern.finditer(class_body):
+            task_name = t_match.group(1)
+            arg_str = t_match.group(2)
+            task_children = parse_arguments(arg_str)
+            children.append({
+                "type": "task",
+                "name": task_name,
+                "children": task_children
+            })
 
-    # ========================================================
-    # ROOT PARSER
-    # ========================================================
-    def parse(self):
-        items = []
-        while True:
-            tok = self.peek()
-            if tok[0] == "EOF":
-                break
-            if tok[1] == "module":
-                items.append(self.parse_module())
-            elif tok[1] == "class":
-                items.append(self.parse_class())
-            else:
-                self.eat()
-        return {"type": "source", "items": items}
+        classes.append({
+            "type": "class",
+            "name": class_name,
+            "extends": extends_name,
+            "children": children
+        })
 
-    # ========================================================
-    # CLASS PARSING
-    # ========================================================
-    def parse_class(self):
-        self.eat()  # 'class'
-        name = self.eat()[1]
-        members = []
-        while True:
-            tok = self.peek()
-            if tok[1] == "endclass" or tok[0] == "EOF":
-                break
-            if tok[1] == "function":
-                members.append(self.parse_function())
-            else:
-                self.eat()
-        if self.peek()[1] == "endclass":
-            self.eat()
-        return {"type": "class", "name": name, "members": members}
+    return classes
 
-    # ========================================================
-    # FUNCTION PARSING
-    # ========================================================
-    def parse_function(self):
-        self.eat()  # 'function'
-        return_type = self.eat()[1]
-        name = self.eat()[1]
-
-        args = []
-        if self.peek()[1] == "(":
-            self.eat()
-            while self.peek()[1] != ")" and self.peek()[0] != "EOF":
-                tok = self.eat()[1]
-                if tok != ",":
-                    args.append(tok)
-            self.eat()  # ')'
-
-        body = self.parse_block(end_tokens=("endfunction",))
-        return {
-            "type": "function",
-            "name": name,
-            "return_type": return_type,
-            "args": args,
-            "body": body
-        }
-
-    # ========================================================
-    # MODULE PARSING
-    # ========================================================
-    def parse_module(self):
-        self.eat()  # 'module'
-        name = self.eat()[1]
-
-        ports = []
-        if self.peek()[1] == "(":
-            self.eat()
-            while self.peek()[1] != ")" and self.peek()[0] != "EOF":
-                t = self.eat()[1]
-                if t != ",":
-                    ports.append(t)
-            self.eat()  # ')'
-
-        if self.peek()[1] == ";":
-            self.eat()
-
-        body = self.parse_block(end_tokens=("endmodule",))
-        return {"type": "module", "name": name, "ports": ports, "body": body}
-
-    # ========================================================
-    # GENERIC BLOCK PARSING
-    # ========================================================
-    def parse_block(self, end_tokens=("end",)):
-        elements = []
-        while True:
-            tok = self.peek()
-            if tok[1] in end_tokens or tok[0] == "EOF":
-                break
-
-            # Signals
-            if tok[1] in ("logic", "wire", "int"):
-                elements.append(self.parse_signal())
-                continue
-
-            # Functions
-            if tok[1] == "function":
-                elements.append(self.parse_function())
-                continue
-
-            # Always blocks
-            if tok[1] in ("always", "always_ff", "always_comb", "always_latch"):
-                elements.append(self.parse_always())
-                continue
-
-            # Begin / end nested block
-            if tok[1] == "begin":
-                self.eat()
-                elements.append({"type": "block", "body": self.parse_block(end_tokens=("end",))})
-                if self.peek()[1] == "end":
-                    self.eat()
-                continue
-
-            # If / else
-            if tok[1] == "if":
-                elements.append(self.parse_if())
-                continue
-
-            # Case
-            if tok[1] == "case":
-                elements.append(self.parse_case())
-                continue
-
-            # Other statement
-            elements.append(self.parse_statement())
-
-        return elements
-
-    # ========================================================
-    # SIGNAL PARSING
-    # ========================================================
-    def parse_signal(self):
-        sig_type = self.eat()[1]
-        width = None
-        if self.peek()[1] == "[":
-            w = []
-            while self.peek()[1] != "]":
-                w.append(self.eat()[1])
-            w.append(self.eat()[1])  # ']'
-            width = "".join(w)
-
-        names = []
-        while self.peek()[1] != ";" and self.peek()[0] != "EOF":
-            tok = self.eat()[1]
-            if tok != ",":
-                names.append(tok)
-
-        if self.peek()[1] == ";":
-            self.eat()
-
-        return {"type": "signal", "data_type": sig_type, "width": width, "names": names}
-
-    # ========================================================
-    # ALWAYS BLOCK PARSING
-    # ========================================================
-    def parse_always(self):
-        kind = self.eat()[1]
-        sensitivity = None
-        if self.peek()[1] == "@":
-            s = []
-            while self.peek()[1] != ")" and self.peek()[0] != "EOF":
-                s.append(self.eat()[1])
-            s.append(self.eat()[1])  # ')'
-            sensitivity = " ".join(s)
-        body = self.parse_block()
-        return {"type": "always", "kind": kind, "sensitivity": sensitivity, "body": body}
-
-    # ========================================================
-    # IF / ELSE PARSING
-    # ========================================================
-    def parse_if(self):
-        self.eat()  # 'if'
-        cond = []
-        if self.peek()[1] == "(":
-            self.eat()
-            while self.peek()[1] != ")" and self.peek()[0] != "EOF":
-                cond.append(self.eat()[1])
-            self.eat()  # ')'
-        then_block = self.parse_block()
-        else_block = None
-        if self.peek()[1] == "else":
-            self.eat()
-            else_block = self.parse_block()
-        return {"type": "if", "cond": "".join(cond), "then": then_block, "else": else_block}
-
-    # ========================================================
-    # CASE PARSING
-    # ========================================================
-    def parse_case(self):
-        self.eat()  # 'case'
-        expr = []
-        while self.peek()[1] != "\n" and self.peek()[0] != "EOF":
-            expr.append(self.eat()[1])
-        body = self.parse_block(end_tokens=("endcase",))
-        if self.peek()[1] == "endcase":
-            self.eat()
-        return {"type": "case", "expr": "".join(expr), "body": body}
-
-    # ========================================================
-    # GENERIC STATEMENT PARSING
-    # ========================================================
-    def parse_statement(self):
-        stmt = []
-        while self.peek()[1] not in (";", "end", "begin", "if", "case") and self.peek()[0] != "EOF":
-            stmt.append(self.eat()[1])
-        if self.peek()[1] == ";":
-            self.eat()
-        return {"type": "statement", "code": " ".join(stmt)}
-
-
-# ============================================================
-# TOP LEVEL FUNCTION
-# ============================================================
-
-def extract_ast(infile, outfile):
-    with open(infile) as f:
-        code = f.read()
-
-    parser = Parser(code)
-    ast = parser.parse()
-
-    with open(outfile, "w") as f:
-        json.dump(ast, f, indent=2)
-
-    print(f"AST saved to {outfile}")
-
-
-# ============================================================
-# CLI
-# ============================================================
+def main():
+    ast = parse_sv_class(INPUT_FILE)
+    with open(OUTPUT_FILE, "w") as f:
+        json.dump(ast, f, indent=4)
+    print(f"AST dumped to {OUTPUT_FILE}")
 
 if __name__ == "__main__":
-    if len(sys.argv) != 3:
-        print("Usage: python sv_ast_hierarchical.py input.sv output.json")
-        sys.exit(1)
-    extract_ast(sys.argv[1], sys.argv[2])
+    main()
