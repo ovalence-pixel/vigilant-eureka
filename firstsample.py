@@ -1,173 +1,183 @@
-// Example SystemVerilog class
-class my_class;
-    // Class properties
-    int id;
-    string name;
+import re
+import json
+import sys
 
-    // Constructor
-    function new(int id_val, string name_val);
-        id   = id_val;
-        name = name_val;
-    endfunction
+# ------------------------------------------------------------
+# TOKENIZER
+# ------------------------------------------------------------
 
-    // Method
-    function void display();
-        $display("ID=%0d, Name=%s", id, name);
-    endfunction
-endclass
+TOKEN_REGEX = re.compile(
+    r"""
+    (?P<KEYWORD>\bclass\b|\bendclass\b|\bmodule\b|\bendmodule\b|
+                \bfunction\b|\bendfunction\b) |
+    (?P<IDENT>[a-zA-Z_][a-zA-Z0-9_$]*) |
+    (?P<NUMBER>\d+'[hdbo][0-9a-fA-F_]+|\d+) |
+    (?P<STRING>"[^"]*") |
+    (?P<SYMBOL>[\(\)\[\]\{\};,=:+\-*/<>]) |
+    (?P<SKIP>\s+|//[^\n]*|/\*.*?\*/) |
+    (?P<OTHER>.)
+    """,
+    re.MULTILINE | re.DOTALL | re.VERBOSE
+)
 
 
-// Module with 10 ports and class declaration
-module top_module(
-    input  logic clk,
-    input  logic rst_n,
-    input  logic [7:0] a,
-    input  logic [7:0] b,
-    output logic [7:0] sum,
-    input  logic enable,
-    output logic ready,
-    input  logic valid,
-    output logic done,
-    input  logic trigger
-);
+def tokenize(code):
+    tokens = []
+    for m in TOKEN_REGEX.finditer(code):
+        kind = m.lastgroup
+        value = m.group()
 
-    // Declare and instantiate the class inside the module
-    my_class obj;
+        if kind == "SKIP":
+            continue
+        if kind == "OTHER":
+            # ignore unknown but don't break stream
+            continue
 
-    initial begin
-        obj = new(1, "example");
-        obj.display();
-    end
+        tokens.append((kind, value))
 
-    // Simple logic
-    always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            sum  <= 0;
-            ready <= 0;
-            done <= 0;
-        end else if (enable & valid) begin
-            sum <= a + b;
-            ready <= 1;
-            done <= trigger;
-        end
-    end
+    tokens.append(("EOF", "EOF"))
+    return tokens
 
-endmodule# -------------------------------------------------------------------
-# SIMPLE RECURSIVE PARSER FOR: 
-#  - class ... endclass
-#  - module ... endmodule
-# -------------------------------------------------------------------
 
-class SVParser:
+# ------------------------------------------------------------
+# SAFE PARSER
+# ------------------------------------------------------------
+
+class Parser:
     def __init__(self, code):
         self.tokens = tokenize(code)
         self.pos = 0
 
-    def peek(self):
+    def safe_peek(self):
+        """Safe peek never goes out of range."""
+        if self.pos >= len(self.tokens):
+            return ("EOF", "EOF")
         return self.tokens[self.pos]
 
-    def eat(self, expected=None):
-        token = self.peek()
-        if expected and token[1] != expected:
-            raise SyntaxError(f"Expected '{expected}', got {token}")
-        self.pos += 1
-        return token
+    def safe_eat(self):
+        """Safe eat: never goes out of range and always returns a token."""
+        tok = self.safe_peek()
+        if self.pos < len(self.tokens):
+            self.pos += 1
+        return tok
 
-    # -------------------------
-    # Top-level parser
-    # -------------------------
+    # --------------------------------------------------------
+    # MAIN PARSE ENTRY
+    # --------------------------------------------------------
+
     def parse(self):
         items = []
-        while self.peek()[0] != "EOF":
-            if self.peek()[1] == "class":
+        while True:
+            tok = self.safe_peek()
+            if tok[0] == "EOF":
+                break
+
+            if tok[1] == "class":
                 items.append(self.parse_class())
-            elif self.peek()[1] == "module":
+
+            elif tok[1] == "module":
                 items.append(self.parse_module())
+
             else:
-                # Ignore other top-level constructs
-                self.pos += 1
+                self.safe_eat()  # skip unknown top-level tokens
         return {"type": "source", "items": items}
 
-    # -------------------------
-    # class my_class; ... endclass
-    # -------------------------
+    # --------------------------------------------------------
+    # PARSE CLASS
+    # --------------------------------------------------------
+
     def parse_class(self):
-        self.eat("class")
-        name = self.eat()[1]
+        self.safe_eat()  # 'class'
+        name = self.safe_eat()[1]
 
-        body = []
-        current_text = []
+        body_tokens = []
+        while True:
+            tok = self.safe_peek()
+            if tok[1] == "endclass" or tok[0] == "EOF":
+                break
+            body_tokens.append(self.safe_eat()[1])
 
-        while not (self.peek()[1] == "endclass"):
-            current_text.append(self.eat()[1])
-
-        self.eat("endclass")
+        if self.safe_peek()[1] == "endclass":
+            self.safe_eat()
 
         return {
             "type": "class",
             "name": name,
-            "body_raw": " ".join(current_text)
+            "body_raw": " ".join(body_tokens)
         }
 
-    # -------------------------
-    # module top(...ports...) ; ... endmodule
-    # -------------------------
+    # --------------------------------------------------------
+    # PARSE MODULE
+    # --------------------------------------------------------
+
     def parse_module(self):
-        self.eat("module")
-        name = self.eat()[1]
+        self.safe_eat()  # 'module'
+        name = self.safe_eat()[1]
 
         ports = []
-        if self.peek()[1] == "(":
-            self.eat("(")
-            while self.peek()[1] != ")":
-                tok = self.eat()[1]
-                if tok not in [","]:
-                    ports.append(tok)
-            self.eat(")")
+        tok = self.safe_peek()
 
-        # eat semicolon if present
-        if self.peek()[1] == ";":
-            self.eat(";")
+        if tok[1] == "(":
+            self.safe_eat()  # '('
+            while True:
+                tok = self.safe_peek()
+                if tok[1] == ")" or tok[0] == "EOF":
+                    break
 
-        body = []
-        current_text = []
-        while not (self.peek()[1] == "endmodule"):
-            current_text.append(self.eat()[1])
+                if tok[1] != ",":
+                    ports.append(tok[1])
+                self.safe_eat()
 
-        self.eat("endmodule")
+            if self.safe_peek()[1] == ")":
+                self.safe_eat()
+
+        # consume optional semicolon
+        if self.safe_peek()[1] == ";":
+            self.safe_eat()
+
+        # BODY
+        body_tokens = []
+        while True:
+            tok = self.safe_peek()
+            if tok[1] == "endmodule" or tok[0] == "EOF":
+                break
+            body_tokens.append(self.safe_eat()[1])
+
+        if self.safe_peek()[1] == "endmodule":
+            self.safe_eat()
 
         return {
             "type": "module",
             "name": name,
             "ports": ports,
-            "body_raw": " ".join(current_text)
+            "body_raw": " ".join(body_tokens)
         }
 
 
-# -------------------------------------------------------------------
-# Top-level function
-# -------------------------------------------------------------------
+# ------------------------------------------------------------
+# TOP-LEVEL FUNCTION
+# ------------------------------------------------------------
 
-def extract_ast(in_file, out_file):
-    with open(in_file, "r") as f:
+def extract_ast(infile, outfile):
+    with open(infile, "r") as f:
         code = f.read()
 
-    parser = SVParser(code)
+    parser = Parser(code)
     ast = parser.parse()
 
-    with open(out_file, "w") as f:
+    with open(outfile, "w") as f:
         json.dump(ast, f, indent=2)
 
-    print(f"AST written to {out_file}")
+    print(f"AST dumped to {outfile}")
 
 
-# -------------------------------------------------------------------
-# Command Line Interface
-# -------------------------------------------------------------------
+# ------------------------------------------------------------
+# CLI ENTRY
+# ------------------------------------------------------------
 
 if __name__ == "__main__":
     if len(sys.argv) != 3:
-        print("Usage: python sv_ast_dump.py input.sv output.json")
+        print("Usage: python sv_ast_dump_fixed.py input.sv output.json")
         sys.exit(1)
 
     extract_ast(sys.argv[1], sys.argv[2])
