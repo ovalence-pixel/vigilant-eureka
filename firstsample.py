@@ -12,7 +12,8 @@ TOKEN_REGEX = re.compile(
                 \bfunction\b|\bendfunction\b|
                 \balways\b|\balways_ff\b|\balways_comb\b|\balways_latch\b|
                 \binput\b|\boutput\b|\binout\b|
-                \blogic\b|\bwire\b|\bint\b) |
+                \blogic\b|\bwire\b|\bint\b|
+                \bif\b|\belse\b|\bcase\b|\bendcase\b|\bbegin\b|\bend\b) |
     (?P<IDENT>[a-zA-Z_][a-zA-Z0-9_$]*) |
     (?P<NUMBER>\d+'[hdbo][0-9a-fA-F_]+|\d+) |
     (?P<STRING>"[^"]*") |
@@ -23,25 +24,21 @@ TOKEN_REGEX = re.compile(
     re.MULTILINE | re.DOTALL | re.VERBOSE
 )
 
+
 def tokenize(code):
     tokens = []
     for m in TOKEN_REGEX.finditer(code):
-        kind = m.lastgroup
-        value = m.group()
-
-        if kind == "SKIP":
+        k = m.lastgroup
+        v = m.group()
+        if k == "SKIP" or k == "OTHER":
             continue
-        if kind == "OTHER":
-            continue
-
-        tokens.append((kind, value))
-
+        tokens.append((k, v))
     tokens.append(("EOF", "EOF"))
     return tokens
 
 
 # ============================================================
-# PARSER BASE
+# PARSER
 # ============================================================
 
 class Parser:
@@ -49,181 +46,163 @@ class Parser:
         self.tokens = tokenize(code)
         self.pos = 0
 
-    # ----------------------------
     def peek(self):
         if self.pos >= len(self.tokens):
             return ("EOF", "EOF")
         return self.tokens[self.pos]
 
-    # ----------------------------
     def eat(self):
-        tok = self.peek()
+        t = self.peek()
         if self.pos < len(self.tokens):
             self.pos += 1
-        return tok
+        return t
 
-    # ============================================================
-    # PARSE ENTRY
-    # ============================================================
+    # ========================================================
+    # ROOT PARSER
+    # ========================================================
     def parse(self):
         items = []
         while True:
             tok = self.peek()
             if tok[0] == "EOF":
                 break
-
-            if tok[1] == "class":
-                items.append(self.parse_class())
-            elif tok[1] == "module":
+            if tok[1] == "module":
                 items.append(self.parse_module())
+            elif tok[1] == "class":
+                items.append(self.parse_class())
             else:
                 self.eat()
-
         return {"type": "source", "items": items}
 
-    # ============================================================
-    # PARSE CLASS
-    # ============================================================
+    # ========================================================
+    # CLASS PARSING
+    # ========================================================
     def parse_class(self):
-        self.eat()  # class
-        class_name = self.eat()[1]
-
+        self.eat()  # 'class'
+        name = self.eat()[1]
         members = []
         while True:
             tok = self.peek()
-
             if tok[1] == "endclass" or tok[0] == "EOF":
                 break
-
             if tok[1] == "function":
                 members.append(self.parse_function())
             else:
                 self.eat()
-
         if self.peek()[1] == "endclass":
             self.eat()
+        return {"type": "class", "name": name, "members": members}
 
-        return {
-            "type": "class",
-            "name": class_name,
-            "members": members
-        }
-
-    # ============================================================
-    # PARSE FUNCTION
-    # ============================================================
+    # ========================================================
+    # FUNCTION PARSING
+    # ========================================================
     def parse_function(self):
-        self.eat()  # function
-        return_type = self.eat()[1]  # usually void/int/logic
+        self.eat()  # 'function'
+        return_type = self.eat()[1]
         name = self.eat()[1]
 
-        # Parse arguments
         args = []
-        if self.peek()[1] == "(":
-            self.eat()
-            arg_tokens = []
-            while self.peek()[1] != ")" and self.peek()[0] != "EOF":
-                arg_tokens.append(self.eat()[1])
-            self.eat()  # ')'
-            args = arg_tokens
-
-        # parse function body until endfunction
-        body = []
-        while self.peek()[1] != "endfunction" and self.peek()[0] != "EOF":
-            body.append(self.eat()[1])
-        if self.peek()[1] == "endfunction":
-            self.eat()
-
-        return {
-            "type": "function",
-            "name": name,
-            "return_type": return_type,
-            "args": args,
-            "body_raw": " ".join(body)
-        }
-
-    # ============================================================
-    # PARSE MODULE
-    # ============================================================
-    def parse_module(self):
-        self.eat()  # module
-        module_name = self.eat()[1]
-
-        # -----------------------------
-        # Parse ports
-        # -----------------------------
-        ports = []
         if self.peek()[1] == "(":
             self.eat()
             while self.peek()[1] != ")" and self.peek()[0] != "EOF":
                 tok = self.eat()[1]
                 if tok != ",":
-                    ports.append(tok)
+                    args.append(tok)
+            self.eat()  # ')'
+
+        body = self.parse_block(end_tokens=("endfunction",))
+        return {
+            "type": "function",
+            "name": name,
+            "return_type": return_type,
+            "args": args,
+            "body": body
+        }
+
+    # ========================================================
+    # MODULE PARSING
+    # ========================================================
+    def parse_module(self):
+        self.eat()  # 'module'
+        name = self.eat()[1]
+
+        ports = []
+        if self.peek()[1] == "(":
+            self.eat()
+            while self.peek()[1] != ")" and self.peek()[0] != "EOF":
+                t = self.eat()[1]
+                if t != ",":
+                    ports.append(t)
             self.eat()  # ')'
 
         if self.peek()[1] == ";":
             self.eat()
 
-        # -----------------------------
-        # Parse body
-        # -----------------------------
-        signals = []
-        functions = []
-        always_blocks = []
-        others = []
+        body = self.parse_block(end_tokens=("endmodule",))
+        return {"type": "module", "name": name, "ports": ports, "body": body}
 
+    # ========================================================
+    # GENERIC BLOCK PARSING
+    # ========================================================
+    def parse_block(self, end_tokens=("end",)):
+        elements = []
         while True:
             tok = self.peek()
-            if tok[1] == "endmodule" or tok[0] == "EOF":
+            if tok[1] in end_tokens or tok[0] == "EOF":
                 break
 
-            # --- signal declaration ---
+            # Signals
             if tok[1] in ("logic", "wire", "int"):
-                signals.append(self.parse_signal())
+                elements.append(self.parse_signal())
                 continue
 
-            # --- function ---
+            # Functions
             if tok[1] == "function":
-                functions.append(self.parse_function())
+                elements.append(self.parse_function())
                 continue
 
-            # --- always block ---
+            # Always blocks
             if tok[1] in ("always", "always_ff", "always_comb", "always_latch"):
-                always_blocks.append(self.parse_always())
+                elements.append(self.parse_always())
                 continue
 
-            others.append(self.eat()[1])
+            # Begin / end nested block
+            if tok[1] == "begin":
+                self.eat()
+                elements.append({"type": "block", "body": self.parse_block(end_tokens=("end",))})
+                if self.peek()[1] == "end":
+                    self.eat()
+                continue
 
-        if self.peek()[1] == "endmodule":
-            self.eat()
+            # If / else
+            if tok[1] == "if":
+                elements.append(self.parse_if())
+                continue
 
-        return {
-            "type": "module",
-            "name": module_name,
-            "ports": ports,
-            "signals": signals,
-            "functions": functions,
-            "always_blocks": always_blocks,
-            "others_raw": " ".join(others),
-        }
+            # Case
+            if tok[1] == "case":
+                elements.append(self.parse_case())
+                continue
 
-    # ============================================================
-    # PARSE SIGNAL DECLARATION
-    # ============================================================
+            # Other statement
+            elements.append(self.parse_statement())
+
+        return elements
+
+    # ========================================================
+    # SIGNAL PARSING
+    # ========================================================
     def parse_signal(self):
-        sig_type = self.eat()[1]  # logic, wire, int
-        bits = None
-        names = []
-
-        # width?
+        sig_type = self.eat()[1]
+        width = None
         if self.peek()[1] == "[":
-            bracket = []
+            w = []
             while self.peek()[1] != "]":
-                bracket.append(self.eat()[1])
-            bracket.append(self.eat()[1])  # consume ']'
-            bits = "".join(bracket)
+                w.append(self.eat()[1])
+            w.append(self.eat()[1])  # ']'
+            width = "".join(w)
 
-        # names until semicolon
+        names = []
         while self.peek()[1] != ";" and self.peek()[0] != "EOF":
             tok = self.eat()[1]
             if tok != ",":
@@ -232,45 +211,68 @@ class Parser:
         if self.peek()[1] == ";":
             self.eat()
 
-        return {
-            "type": "signal",
-            "data_type": sig_type,
-            "width": bits,
-            "names": names
-        }
+        return {"type": "signal", "data_type": sig_type, "width": width, "names": names}
 
-    # ============================================================
-    # PARSE ALWAYS BLOCK
-    # ============================================================
+    # ========================================================
+    # ALWAYS BLOCK PARSING
+    # ========================================================
     def parse_always(self):
-        kind = self.eat()[1]  # always, always_ff, always_comb
-
+        kind = self.eat()[1]
         sensitivity = None
         if self.peek()[1] == "@":
-            sens = []
+            s = []
             while self.peek()[1] != ")" and self.peek()[0] != "EOF":
-                sens.append(self.eat()[1])
-            sens.append(self.eat()[1])  # consume ')'
-            sensitivity = " ".join(sens)
+                s.append(self.eat()[1])
+            s.append(self.eat()[1])  # ')'
+            sensitivity = " ".join(s)
+        body = self.parse_block()
+        return {"type": "always", "kind": kind, "sensitivity": sensitivity, "body": body}
 
-        # parse body: begin ... end
-        body = []
-        while not (self.peek()[1] == "end" or self.peek()[1] == "endmodule"):
-            body.append(self.eat()[1])
-
-        if self.peek()[1] == "end":
+    # ========================================================
+    # IF / ELSE PARSING
+    # ========================================================
+    def parse_if(self):
+        self.eat()  # 'if'
+        cond = []
+        if self.peek()[1] == "(":
             self.eat()
+            while self.peek()[1] != ")" and self.peek()[0] != "EOF":
+                cond.append(self.eat()[1])
+            self.eat()  # ')'
+        then_block = self.parse_block()
+        else_block = None
+        if self.peek()[1] == "else":
+            self.eat()
+            else_block = self.parse_block()
+        return {"type": "if", "cond": "".join(cond), "then": then_block, "else": else_block}
 
-        return {
-            "type": "always",
-            "kind": kind,
-            "sensitivity": sensitivity,
-            "body_raw": " ".join(body)
-        }
+    # ========================================================
+    # CASE PARSING
+    # ========================================================
+    def parse_case(self):
+        self.eat()  # 'case'
+        expr = []
+        while self.peek()[1] != "\n" and self.peek()[0] != "EOF":
+            expr.append(self.eat()[1])
+        body = self.parse_block(end_tokens=("endcase",))
+        if self.peek()[1] == "endcase":
+            self.eat()
+        return {"type": "case", "expr": "".join(expr), "body": body}
+
+    # ========================================================
+    # GENERIC STATEMENT PARSING
+    # ========================================================
+    def parse_statement(self):
+        stmt = []
+        while self.peek()[1] not in (";", "end", "begin", "if", "case") and self.peek()[0] != "EOF":
+            stmt.append(self.eat()[1])
+        if self.peek()[1] == ";":
+            self.eat()
+        return {"type": "statement", "code": " ".join(stmt)}
 
 
 # ============================================================
-# TOP LEVEL
+# TOP LEVEL FUNCTION
 # ============================================================
 
 def extract_ast(infile, outfile):
@@ -283,7 +285,7 @@ def extract_ast(infile, outfile):
     with open(outfile, "w") as f:
         json.dump(ast, f, indent=2)
 
-    print(f"[OK] AST saved to {outfile}")
+    print(f"AST saved to {outfile}")
 
 
 # ============================================================
@@ -292,7 +294,6 @@ def extract_ast(infile, outfile):
 
 if __name__ == "__main__":
     if len(sys.argv) != 3:
-        print("Usage: python sv_ast_enhanced.py input.sv output.json")
+        print("Usage: python sv_ast_hierarchical.py input.sv output.json")
         sys.exit(1)
-
     extract_ast(sys.argv[1], sys.argv[2])
