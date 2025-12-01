@@ -1,40 +1,58 @@
-import re
-import json
-import sys
+// Example SystemVerilog class
+class my_class;
+    // Class properties
+    int id;
+    string name;
 
-# -------------------------------------------------------------------
-# TOKEN PATTERNS (simple lexical splitter)
-# -------------------------------------------------------------------
-TOKEN_REGEX = re.compile(
-    r"""
-    (?P<KEYWORD>\bclass\b|\bendclass\b|\bmodule\b|\bendmodule\b|\bfunction\b|\bendfunction\b) |
-    (?P<IDENT>[a-zA-Z_][a-zA-Z0-9_]*) |
-    (?P<NUMBER>\d+'[hdbo][0-9a-fA-F_]+|\d+) |
-    (?P<SYMBOL>[\(\)\[\]\{\};,=:+\-*/<>]) |
-    (?P<STRING>"[^"]*") |
-    (?P<SKIP>\s+|//[^\n]*|/\*.*?\*/ ) |
-    (?P<OTHER>.)
-    """,
-    re.MULTILINE | re.DOTALL | re.VERBOSE
-)
+    // Constructor
+    function new(int id_val, string name_val);
+        id   = id_val;
+        name = name_val;
+    endfunction
 
-def tokenize(code):
-    tokens = []
-    for m in TOKEN_REGEX.finditer(code):
-        kind = m.lastgroup
-        value = m.group()
-
-        if kind == "SKIP":
-            continue
-        if kind == "OTHER":
-            continue  # ignore unknowns safely
-
-        tokens.append((kind, value))
-    tokens.append(("EOF", None))
-    return tokens
+    // Method
+    function void display();
+        $display("ID=%0d, Name=%s", id, name);
+    endfunction
+endclass
 
 
-# -------------------------------------------------------------------
+// Module with 10 ports and class declaration
+module top_module(
+    input  logic clk,
+    input  logic rst_n,
+    input  logic [7:0] a,
+    input  logic [7:0] b,
+    output logic [7:0] sum,
+    input  logic enable,
+    output logic ready,
+    input  logic valid,
+    output logic done,
+    input  logic trigger
+);
+
+    // Declare and instantiate the class inside the module
+    my_class obj;
+
+    initial begin
+        obj = new(1, "example");
+        obj.display();
+    end
+
+    // Simple logic
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            sum  <= 0;
+            ready <= 0;
+            done <= 0;
+        end else if (enable & valid) begin
+            sum <= a + b;
+            ready <= 1;
+            done <= trigger;
+        end
+    end
+
+endmodule# -------------------------------------------------------------------
 # SIMPLE RECURSIVE PARSER FOR: 
 #  - class ... endclass
 #  - module ... endmodule
