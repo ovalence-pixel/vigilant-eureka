@@ -1,3 +1,28 @@
+import os
+
+# Directory to scan
+DIRECTORY = "./"  # Change this to your target directory
+
+def get_all_files(directory):
+    all_files = []
+    for root, dirs, files in os.walk(directory):
+        for file in files:
+            full_path = os.path.join(root, file)
+            all_files.append(full_path)
+    return all_files
+
+def main():
+    files = get_all_files(DIRECTORY)
+    print("Found files:")
+    for f in files:
+        print(f)
+    print(f"\nTotal files: {len(files)}")
+
+if __name__ == "__main__":
+    main()
+
+
+
 import re
 import json
 
